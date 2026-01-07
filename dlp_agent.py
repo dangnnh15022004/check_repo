@@ -250,31 +250,8 @@ def restore_clipboard(data_type, data):
                     return
                     
                 elif data_type == "image":
-                    if isinstance(data, Image.Image) and win32clipboard:
-                        b = io.BytesIO()
-                        data.convert("RGB").save(b, "BMP")
-                        bmp_data = b.getvalue()[14:]  # Skip BMP header
-                        
-                        opened = False
-                        for _ in range(10):
-                            try:
-                                win32clipboard.OpenClipboard()
-                                opened = True
-                                break
-                            except:
-                                time.sleep(0.05)
-                        
-                        if opened:
-                            try:
-                                win32clipboard.EmptyClipboard()
-                                win32clipboard.SetClipboardData(win32clipboard.CF_DIB, bmp_data)
-                            finally:
-                                try:
-                                    win32clipboard.CloseClipboard()
-                                except:
-                                    pass
-                        print(f"✅ Restored Image to clipboard")
-                        return
+                    # Không restore ảnh để tránh hỗ trợ các app chụp màn hình
+                    return
                 
                 elif data_type == "file":
                     # Restore file object vào clipboard Windows
@@ -425,19 +402,35 @@ def ensure_single_instance():
     return mutex 
 
 def kill_banned_windows():
-    if not win32gui: return
-    def callback(hwnd, extra):
-        try:
-            if win32gui.IsWindowVisible(hwnd):
-                window_text = win32gui.GetWindowText(hwnd)
-                for banned in BANNED_WINDOW_TITLES:
-                    if banned.lower() in window_text.lower():
-                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                        try: psutil.Process(pid).kill()
-                        except: pass
-        except: pass
-    while RUN_FLAG:
+    def kill_by_window_title():
+        if not win32gui: return
+        def callback(hwnd, extra):
+            try:
+                if win32gui.IsWindowVisible(hwnd):
+                    window_text = win32gui.GetWindowText(hwnd)
+                    for banned in BANNED_WINDOW_TITLES:
+                        if banned.lower() in window_text.lower():
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            try: psutil.Process(pid).kill()
+                            except: pass
+            except: pass
         try: win32gui.EnumWindows(callback, None)
+        except: pass
+
+    def kill_by_process_name():
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                name = proc.info['name'] or ""
+                for banned in BANNED_APPS_WINDOWS:
+                    if banned.lower() == name.lower():
+                        proc.kill()
+                        break
+            except: pass
+
+    while RUN_FLAG:
+        try:
+            kill_by_window_title()
+            kill_by_process_name()
         except: pass
         time.sleep(0.5)
 
@@ -548,7 +541,7 @@ exit 0
         with open(hook_file_ps1, "w", encoding="utf-8") as f:
             f.write(pre_push_script)
         
-        # 4. Tạo batch wrapper để Git có thể gọi PowerShell script
+        # 4. Tạo batch wrapper để Git có thể gọi PowerShell script (cho git.exe thuần Windows)
         pre_push_bat = os.path.join(HOOKS_DIR, "pre-push.bat")
         bat_content = f'''@echo off
 powershell.exe -ExecutionPolicy Bypass -File "%~dp0pre-push.ps1" %1 %2
@@ -556,6 +549,31 @@ exit %errorlevel%
 '''
         with open(pre_push_bat, "w", encoding="utf-8") as f:
             f.write(bat_content)
+
+        # 4b. Tạo shell pre-push cho Git Bash / WSL (gọi ngược lại Python như bạn đề xuất)
+        if getattr(sys, 'frozen', False):
+            exe = sys.executable.replace('\\', '/')
+            shell_run_cmd = f'"{exe}"'
+        else:
+            exe = sys.executable.replace('\\', '/')
+            script_path = os.path.abspath(__file__).replace('\\', '/')
+            shell_run_cmd = f'"{exe}" "{script_path}"'
+
+        hook_file_sh = os.path.join(HOOKS_DIR, "pre-push")
+        pre_push_sh_content = f"""#!/bin/sh
+# DLP Agent Git Firewall (Windows, shell-based)
+remote=\"$1\"
+url=\"$2\"
+
+if [ -z \"$url\" ]; then
+    url=$(git config --get remote.\"$remote\".url)
+fi
+
+{shell_run_cmd} --check-git-push \"$url\"
+exit $?
+"""
+        with open(hook_file_sh, "w", encoding="utf-8", newline="\\n") as f:
+            f.write(pre_push_sh_content)
         
         # 5. Cấu hình Git Global
         subprocess.run(["git", "config", "--global", "core.hooksPath", HOOKS_DIR], 
@@ -1219,7 +1237,27 @@ if __name__ == "__main__":
         except: pass
         sys.exit(0)
 
-    # 3. Git Push Alert Handler (được gọi từ git hook)
+    # 3. Git Push Check Handler (được gọi từ git hook - trả về exit code cho Git)
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-git-push":
+        url = sys.argv[2] if len(sys.argv) > 2 else ""
+        # Cho phép nếu URL thuộc whitelist
+        allowed = False
+        for domain in WHITELIST_REPO:
+            if domain and domain in url:
+                allowed = True
+                break
+        if allowed:
+            sys.exit(0)
+        # Repo ngoài whitelist → chặn và gửi email
+        try:
+            print(f"🚫 [DLP] BLOCKED: Push to {url} is not allowed.")
+            print(f"💡 Allowed repos: {', '.join(WHITELIST_REPO)}")
+            send_email_git_push(url)
+        except Exception as e:
+            print(f"Error sending git push alert: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 4. Git Push Alert Handler cũ (giữ lại cho tương thích nếu có nơi khác gọi)
     if len(sys.argv) > 1 and sys.argv[1] == "--git-push-alert":
         if len(sys.argv) > 2:
             repo_url = sys.argv[2]
@@ -1233,7 +1271,7 @@ if __name__ == "__main__":
             print("Usage: dlp_agent.py --git-push-alert <repo_url>", file=sys.stderr)
             sys.exit(1)
 
-    # 4. Chạy chính (DLP Agent)
+    # 5. Chạy chính (DLP Agent)
     _mutex = ensure_single_instance()
     
     if not AZURE_ENDPOINT or not AZURE_KEY or not AZURE_MODEL:
@@ -1244,4 +1282,3 @@ if __name__ == "__main__":
         main_loop()
     except KeyboardInterrupt:
         pass
-        
