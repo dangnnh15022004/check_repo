@@ -1,0 +1,44 @@
+# --- Cấu hình & Bảo mật (QUAN TRỌNG) ---
+.env
+.env.local
+*.key
+*.pem
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+
+# --- PyInstaller Build Artifacts ---
+build/
+dist/
+*.spec
+
+# --- macOS System Files ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Project Specific (DLP Agent Build) ---
+# Thư mục tạm khi build pkg
+pkg_staging/
+pkg_scripts/
+
+# Sản phẩm đầu ra
+*.app/
+*.pkg
+*.dmg
+
+# --- Logs & Locks ---
+*.log
+.dlp_agent.lock
+*.out
+*.err
+
+# --- IDEs ---
+.vscode/
+.idea/
